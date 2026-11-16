@@ -1,0 +1,1 @@
+File joblib dan JSON konfigurasi model disimpan di folder ini. Pastikan ikut terdeploy bersama backend.
