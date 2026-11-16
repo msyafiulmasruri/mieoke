@@ -1,4 +1,4 @@
-import re, html, math, secrets
+import os, re, html, math, secrets, threading
 from datetime import datetime, timedelta, date, time
 from pathlib import Path
 from functools import lru_cache
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine, String, Integer, Float, Boolean, DateTime, ForeignKey, Text, JSON, or_, text as sql_text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker, Session, selectinload
+from sqlalchemy.pool import NullPool
 from jose import jwt
 from passlib.context import CryptContext
 from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
@@ -54,7 +55,26 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=300)
+
+
+def normalize_db_url(url: str) -> str:
+    """Neon memberi URL `postgresql://...`; SQLAlchemy butuh driver psycopg v3 (`postgresql+psycopg://`)."""
+    url = (url or "").strip()
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
+# Di Vercel (serverless) setiap instance berumur pendek: jangan menahan pool koneksi,
+# dan matikan prepared statement agar aman dengan Neon connection pooler (PgBouncer).
+IS_SERVERLESS = bool(os.getenv("VERCEL"))
+_engine_kwargs: dict = {"pool_pre_ping": True}
+if IS_SERVERLESS:
+    _engine_kwargs.update(poolclass=NullPool, connect_args={"prepare_threshold": None})
+else:
+    _engine_kwargs.update(pool_recycle=300)
+engine = create_engine(normalize_db_url(settings.database_url), **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -171,6 +191,7 @@ class Review(Base):
 # Utilitas
 # ---------------------------------------------------------------------------
 def db_session():
+    ensure_db_ready()
     db = SessionLocal()
     try:
         yield db
@@ -576,8 +597,7 @@ SEED_MENUS = [
 ]
 
 
-@app.on_event("startup")
-def startup():
+def init_database():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         for col_sql in (
@@ -599,6 +619,31 @@ def startup():
         db.commit()
     finally:
         db.close()
+
+
+_db_ready = False
+_db_lock = threading.Lock()
+
+
+def ensure_db_ready():
+    """Dijalankan sekali per instance. Di Vercel event startup tidak selalu terpanggil,
+    jadi inisialisasi juga dipicu dari request pertama yang membutuhkan database."""
+    global _db_ready
+    if _db_ready:
+        return
+    with _db_lock:
+        if not _db_ready:
+            init_database()
+            _db_ready = True
+
+
+@app.on_event("startup")
+def startup():
+    try:
+        ensure_db_ready()
+    except Exception:
+        # Jangan gagalkan boot; akan dicoba lagi pada request pertama.
+        pass
 
 
 @app.get("/health")

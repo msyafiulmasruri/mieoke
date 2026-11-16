@@ -131,6 +131,12 @@ npm run dev
 
 ---
 
+## Deploy ke Production (Vercel + Neon)
+
+Panduan langkah demi langkah hosting frontend & backend di **Vercel** dengan database **Neon PostgreSQL** tersedia di **[DEPLOY_VERCEL_NEON.md](DEPLOY_VERCEL_NEON.md)**.
+
+---
+
 ## Struktur Direktori
 
 ```text
